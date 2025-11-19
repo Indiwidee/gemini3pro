@@ -11,7 +11,10 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.3",
+    "express": "^5.1.0",
     "groq-sdk": "^0.36.0",
     "node-telegram-bot-api": "^0.66.0",
     "sqlite3": "^5.1.7"

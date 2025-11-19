@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Получить генерации</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+        .card {
+            background: white;
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            max-width: 300px;
+            width: 90%;
+        }
+        h1 { color: #333; font-size: 1.5rem; margin-bottom: 1rem; }
+        p { color: #666; margin-bottom: 1.5rem; }
+        button {
+            background-color: #0088cc;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #006699; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #status { margin-top: 1rem; font-size: 0.9rem; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Бесплатные генерации</h1>
+        <p>Посмотрите рекламу (симуляция), чтобы получить +2 генерации для бота.</p>
+        
+        <button id="adButton" onclick="watchAd()">Смотреть рекламу</button>
+        <div id="status"></div>
+    </div>
+
+    <script>
+        // Получаем telegram_id из URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const telegramId = urlParams.get('telegram_id');
+        const btn = document.getElementById('adButton');
+        const status = document.getElementById('status');
+
+        function watchAd() {
+            if (!telegramId) {
+                status.innerHTML = "<span class='error'>Ошибка: ID пользователя не найден. Перезапустите бота.</span>";
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Просмотр рекламы...";
+
+            // Симуляция просмотра рекламы (3 секунды)
+            setTimeout(() => {
+                finishAd();
+            }, 3000);
+        }
+
+        function finishAd() {
+            btn.innerText = "Получение награды...";
+            
+            // Отправляем запрос на наш сервер
+            fetch('/api/reward', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ telegram_id: telegramId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    status.innerHTML = "<span class='success'>Успешно! Вы получили +2 генерации. Можете закрыть это окно.</span>";
+                    btn.innerText = "Готово";
+                } else {
+                    throw new Error(data.error || 'Unknown error');
+                }
+            })
+            .catch(err => {
+                status.innerHTML = "<span class='error'>Ошибка сервера: " + err.message + "</span>";
+                btn.disabled = false;
+                btn.innerText = "Смотреть рекламу";
+            });
+        }
+    </script>
+</body>
+</html>
