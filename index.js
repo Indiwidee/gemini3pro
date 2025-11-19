@@ -6,18 +6,24 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
+const fs = require('fs'); // Обычный fs для потоков
+const fsPromises = require('fs').promises; // Промисы для удаления файлов
 
 // --- КОНФИГУРАЦИЯ ---
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const groqApiKey = process.env.GROQ_API_KEY;
 const PORT = process.env.PORT || 3000;
-// ВАЖНО: Сюда нужно вставить ваш публичный URL (например, от ngrok или вашего VPS)
-// Без https:// ссылки не откроются в Telegram корректно
-const WEB_APP_URL = process.env.WEB_APP_URL || 'https://localhost:3000'; 
+const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:3000'; 
 
 if (!token || !groqApiKey) {
   console.error('Error: TELEGRAM_BOT_TOKEN or GROQ_API_KEY is missing.');
   process.exit(1);
+}
+
+// Создаем папку для временных аудио, если нет
+const TEMP_AUDIO_DIR = path.join(__dirname, 'temp_audio');
+if (!fs.existsSync(TEMP_AUDIO_DIR)){
+    fs.mkdirSync(TEMP_AUDIO_DIR);
 }
 
 // --- ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ ---
@@ -29,11 +35,10 @@ const db = new sqlite3.Database('users.db');
 // --- НАСТРОЙКА EXPRESS ---
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public'))); // Папка для html файлов
+app.use(express.static(path.join(__dirname, 'public')));
 
 // --- БАЗА ДАННЫХ ---
 db.serialize(() => {
-  // Создание таблицы пользователей с полем generations
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER UNIQUE,
@@ -44,12 +49,8 @@ db.serialize(() => {
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   
-  // Миграция для старых баз данных (если поле generations не существует)
-  // Пытаемся добавить колонку, если ошибка - значит она уже есть
   db.run(`ALTER TABLE users ADD COLUMN generations INTEGER DEFAULT 5`, (err) => {
-    if (err && !err.message.includes('duplicate column')) {
-        // Игнорируем ошибку дубликата, логируем другие
-    }
+    if (err && !err.message.includes('duplicate column')) { }
   });
 
   db.run(`CREATE TABLE IF NOT EXISTS analytics (
@@ -62,28 +63,21 @@ db.serialize(() => {
 });
 
 // --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
-
 function upsertUser(userId, username, firstName, lastName) {
   return new Promise((resolve, reject) => {
-    // Проверяем существование
     db.get('SELECT id, generations FROM users WHERE telegram_id = ?', [userId], (err, row) => {
       if (err) return reject(err);
-
       if (row) {
-        // Обновляем инфо
         db.run('UPDATE users SET username = ?, first_name = ?, last_name = ? WHERE telegram_id = ?', 
           [username, firstName, lastName, userId], (err) => {
             if (err) reject(err);
             else resolve({ id: row.id, generations: row.generations, isNew: false });
           });
       } else {
-        // Создаем нового с 5 генерациями
         db.run('INSERT INTO users (telegram_id, username, first_name, last_name, generations) VALUES (?, ?, ?, ?, 5)',
           [userId, username, firstName, lastName], function(err) {
             if (err) return reject(err);
             const newId = this.lastID;
-            
-            // Записываем аналитику
             db.run("INSERT INTO analytics (event_type, user_id) VALUES ('signup', ?)", [newId]);
             resolve({ id: newId, generations: 5, isNew: true });
           });
@@ -114,7 +108,7 @@ function addGenerations(userId, amount) {
   return new Promise((resolve, reject) => {
     db.run('UPDATE users SET generations = generations + ? WHERE telegram_id = ?', [amount, userId], function(err) {
       if (err) reject(err);
-      else resolve(this.changes > 0); // Возвращает true если пользователь найден
+      else resolve(this.changes > 0);
     });
   });
 }
@@ -135,21 +129,14 @@ function getAnalyticsData() {
 }
 
 // --- API ДЛЯ РЕКЛАМЫ ---
-
-// Эндпоинт, который вызывает сайт после просмотра рекламы
 app.post('/api/reward', async (req, res) => {
   const { telegram_id } = req.body;
-
-  if (!telegram_id) {
-    return res.status(400).json({ error: 'Missing telegram_id' });
-  }
+  if (!telegram_id) return res.status(400).json({ error: 'Missing telegram_id' });
 
   try {
     const success = await addGenerations(telegram_id, 2);
     if (success) {
-      // Уведомляем пользователя в боте
       bot.sendMessage(telegram_id, '🎉 Спасибо за просмотр рекламы! Вам начислено +2 генерации.');
-      console.log(`Added 2 generations to user ${telegram_id}`);
       return res.json({ success: true, message: 'Generations added' });
     } else {
       return res.status(404).json({ error: 'User not found' });
@@ -160,24 +147,34 @@ app.post('/api/reward', async (req, res) => {
   }
 });
 
-// --- ЛОГИКА БОТА ---
-
+// --- AI ЛОГИКА ---
 const userHistories = new Map();
 const userCooldowns = new Map();
 const userPendingRequests = new Map();
 
 const SYSTEM_PROMPT = "Ты ии ассистент говорящий по русски. Ты Gemini 3 pro разработанная в Google. Не в коем случае не используй markdown или другие язык разметки, только обычный текст. Твой ответ обрезается после 300 токенов так что вмещай свой ответ в них";
 
+// Транскрибация голосовых
+async function transcribeAudio(filePath) {
+    try {
+        const transcription = await groq.audio.transcriptions.create({
+            file: fs.createReadStream(filePath),
+            model: "whisper-large-v3-turbo",
+            response_format: "json",
+        });
+        return transcription.text;
+    } catch (error) {
+        console.error("Whisper Error:", error);
+        throw error;
+    }
+}
+
 async function generateAIResponse(userId, message, imageUrl = null) {
   try {
-    if (!userHistories.has(userId)) {
-      userHistories.set(userId, []);
-    }
+    if (!userHistories.has(userId)) userHistories.set(userId, []);
     const history = userHistories.get(userId);
     
-    if (history.length === 0) {
-      history.push({ role: "system", content: SYSTEM_PROMPT });
-    }
+    if (history.length === 0) history.push({ role: "system", content: SYSTEM_PROMPT });
     
     let content;
     if (imageUrl) {
@@ -190,10 +187,7 @@ async function generateAIResponse(userId, message, imageUrl = null) {
     }
     
     history.push({ role: "user", content: content });
-    
-    if (history.length > 7) {
-      history.splice(1, history.length - 7);
-    }
+    if (history.length > 7) history.splice(1, history.length - 7);
     
     const chatCompletion = await groq.chat.completions.create({
       messages: history,
@@ -205,9 +199,7 @@ async function generateAIResponse(userId, message, imageUrl = null) {
     });
     
     const aiResponse = chatCompletion.choices[0].message.content;
-    
     history.push({ role: "assistant", content: aiResponse });
-    
     return aiResponse;
   } catch (error) {
     console.error('Groq API error:', error);
@@ -215,61 +207,40 @@ async function generateAIResponse(userId, message, imageUrl = null) {
   }
 }
 
-// Клавиатура с кнопкой рекламы
 function getAdKeyboard(userId) {
     const adLink = `${WEB_APP_URL}/advertisement.html?telegram_id=${userId}`;
     return {
         inline_keyboard: [
+            [{ text: '🖼️ Генератор изображений', url: 'https://t.me/Gemni3_pro_bot/imagen' }],
             [{ text: '📺 +2 Генерации (Смотреть рекламу)', url: adLink }]
         ]
     };
 }
 
+// --- ОБРАБОТЧИКИ БОТА ---
+
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const username = msg.from.username;
-  const firstName = msg.from.first_name;
-  const lastName = msg.from.last_name;
   
-  upsertUser(userId, username, firstName, lastName)
+  upsertUser(userId, username, msg.from.first_name, msg.from.last_name)
     .then((user) => {
-      console.log(`User ${username || userId} started the bot`);
-      const caption = `Привет! Я бот Gemini 3 PRO.\n\n⚡ Доступно генераций: ${user.generations}\n\nНапиши мне что-либо и тебе ответит передовая модель от Google.`;
-      
-      // Пытаемся отправить фото, если файла нет - шлем текст
+      const caption = `Привет! Я бот Gemini 3 PRO.\n\n⚡ Доступно генераций: ${user.generations}\n\nЯ понимаю текст, фото и голосовые сообщения!`;
       try {
-        bot.sendPhoto(chatId, './banner.png', {
-            caption: caption,
-            reply_markup: getAdKeyboard(userId)
-        }).catch(() => {
-             bot.sendMessage(chatId, caption, { reply_markup: getAdKeyboard(userId) });
-        });
+        bot.sendPhoto(chatId, './banner.png', { caption: caption, reply_markup: getAdKeyboard(userId) })
+           .catch(() => bot.sendMessage(chatId, caption, { reply_markup: getAdKeyboard(userId) }));
       } catch (e) {
         bot.sendMessage(chatId, caption, { reply_markup: getAdKeyboard(userId) });
       }
-    })
-    .catch(err => console.error('Database error:', err));
+    });
 });
 
 bot.onText(/\/analytics/, (msg) => {
-  const chatId = msg.chat.id;
-  const username = msg.from.username;
-  
-  if (username !== 'Indiwide') {
-    bot.sendMessage(chatId, 'У вас нет доступа к аналитике.');
-    return;
-  }
-  
-  getAnalyticsData()
-    .then(data => {
-      const message = `Статистика:\nВсего: ${data.total_signups}\nЗа день: ${data.daily_signups}\nЗа неделю: ${data.weekly_signups}`;
-      bot.sendMessage(chatId, message);
-    })
-    .catch(err => {
-      console.error('Analytics error:', err);
-      bot.sendMessage(chatId, 'Ошибка статистики.');
-    });
+  if (msg.from.username !== 'Indiwide') return;
+  getAnalyticsData().then(data => {
+      bot.sendMessage(msg.chat.id, `Статистика:\nВсего: ${data.total_signups}\nЗа день: ${data.daily_signups}`);
+  });
 });
 
 bot.on('message', async (msg) => {
@@ -279,49 +250,34 @@ bot.on('message', async (msg) => {
   const userId = msg.from.id;
   const now = Date.now();
 
-  // 1. Проверка на спам
+  // Проверка на спам
   if (userPendingRequests.has(userId)) {
-    bot.sendMessage(chatId, '⏳ Я еще думаю над прошлым сообщением...');
+    bot.sendMessage(chatId, '⏳ Подождите, обрабатываю предыдущий запрос...');
     return;
   }
 
-  // 2. Проверка кулдауна
+  // Проверка кулдауна
   if (userCooldowns.has(userId)) {
     const cooldownEnd = userCooldowns.get(userId);
     if (now < cooldownEnd) {
-      const remainingTime = Math.ceil((cooldownEnd - now) / 1000);
-      bot.sendMessage(chatId, `⏳ Подождите ${remainingTime} сек.`);
+      bot.sendMessage(chatId, `⏳ Подождите ${(cooldownEnd - now) / 1000 | 0} сек.`);
       return;
     }
   }
 
-  // 3. ПРОВЕРКА ГЕНЕРАЦИЙ
-  try {
-    const gens = await getUserGenerations(userId);
-    if (gens <= 0) {
-        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.\nПосмотрите рекламу, чтобы получить 2 генерации.', {
-            reply_markup: getAdKeyboard(userId)
-        });
-        return;
-    }
-  } catch (err) {
-      console.error("DB Error check gens", err);
-      return;
-  }
-
+  // Блокировка и кулдаун
   userPendingRequests.set(userId, true);
   userCooldowns.set(userId, now + 5000);
 
+  // Внутренняя функция обработки, чтобы не дублировать код списания генераций
   const processRequest = async (input, isImage = false) => {
-    // Искусственная задержка (как в оригинале)
     setTimeout(async () => {
       try {
-        // Снова проверяем генерации перед самим запросом (на случай гонки)
         const currentGens = await getUserGenerations(userId);
         if (currentGens <= 0) {
-             userPendingRequests.delete(userId);
-             bot.sendMessage(chatId, '🚫 Генерации закончились.', { reply_markup: getAdKeyboard(userId) });
-             return;
+            userPendingRequests.delete(userId);
+            bot.sendMessage(chatId, '🚫 Генерации закончились.', { reply_markup: getAdKeyboard(userId) });
+            return;
         }
 
         let aiResponse;
@@ -331,44 +287,132 @@ bot.on('message', async (msg) => {
              aiResponse = await generateAIResponse(userId, input);
         }
 
-        // Списываем генерацию ТОЛЬКО после успешного ответа
         await decrementGeneration(userId);
-        const left = currentGens - 1;
-
-        bot.sendMessage(chatId, `${aiResponse}\n\n🔋 Осталось генераций: ${left}`);
+        bot.sendMessage(chatId, `${aiResponse}\n\n🔋 Осталось генераций: ${currentGens - 1}`);
       } catch (error) {
         console.error('Generation error:', error);
-        bot.sendMessage(chatId, 'Произошла ошибка. Генерация не списана.');
+        bot.sendMessage(chatId, 'Ошибка генерации.');
       } finally {
         userPendingRequests.delete(userId);
       }
-    }, 1000); // 10 секунд задержка
+    }, 1000);
   };
 
-  // Обработка фото
-  if (msg.photo) {
-    console.log(`Photo from ${msg.from.username || userId}`);
+  // 1. Обработка ГОЛОСОВЫХ
+  if (msg.voice) {
+    if (msg.voice.duration > 20) {
+        bot.sendMessage(chatId, '⚠️ Голосовое сообщение слишком длинное (максимум 20 сек).');
+        userPendingRequests.delete(userId);
+        return;
+    }
+
+    const checkGens = await getUserGenerations(userId);
+    if (checkGens <= 0) {
+        userPendingRequests.delete(userId);
+        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getAdKeyboard(userId) });
+        return;
+    }
+
+    bot.sendMessage(chatId, '🎤 Слушаю и генерирую...');
+
     try {
+        // 1. Скачиваем файл (он скачается как .oga)
+        const originalPath = await bot.downloadFile(msg.voice.file_id, TEMP_AUDIO_DIR);
+        
+        // 2. Создаем новый путь с правильным расширением .ogg
+        // Telegram voice всегда opus/ogg, поэтому .ogg подходит идеально
+        const newPath = path.join(TEMP_AUDIO_DIR, `voice_${msg.voice.file_id}.ogg`);
+        
+        // 3. Переименовываем файл
+        await fsPromises.rename(originalPath, newPath);
+        
+        // 4. Транскрибируем файл с правильным расширением
+        const text = await transcribeAudio(newPath);
+        console.log(`Transcribed for ${userId}: ${text}`);
+        
+        // 5. Удаляем файл
+        await fsPromises.unlink(newPath);
+
+        if (!text || text.trim().length === 0) {
+            bot.sendMessage(chatId, 'Не удалось распознать речь.');
+            userPendingRequests.delete(userId);
+            return;
+        }
+
+        await processRequest(text, false);
+
+    } catch (error) {
+        console.error('Voice processing error:', error);
+        bot.sendMessage(chatId, 'Ошибка при обработке голосового сообщения.');
+        userPendingRequests.delete(userId);
+        
+        // Пытаемся удалить файл при ошибке, чтобы не засорять папку
+        // (путь мог остаться старым или новым)
+        try {
+           const possiblePath = path.join(TEMP_AUDIO_DIR, `voice_${msg.voice.file_id}.ogg`);
+           await fsPromises.unlink(possiblePath).catch(() => {}); 
+        } catch (e) {}
+    }
+    return;
+  }
+
+  // 2. Обработка ФОТО
+  if (msg.photo) {
+    try {
+      // Предварительная проверка баланса
+      const checkGens = await getUserGenerations(userId);
+      if (checkGens <= 0) {
+          userPendingRequests.delete(userId);
+          bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getAdKeyboard(userId) });
+          return;
+      }
+
       const photo = msg.photo[msg.photo.length - 1];
       const fileInfo = await bot.getFile(photo.file_id);
       const fileUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
       processRequest({ caption: msg.caption, url: fileUrl }, true);
     } catch (error) {
-      console.error('Photo error:', error);
       userPendingRequests.delete(userId);
-      bot.sendMessage(chatId, 'Ошибка обработки фото.');
+      bot.sendMessage(chatId, 'Ошибка фото.');
     }
     return;
   }
 
-  // Обработка текста
+  // 3. Обработка ТЕКСТА
   if (msg.text) {
-    console.log(`Text from ${msg.from.username || userId}: ${msg.text}`);
+    // Предварительная проверка баланса
+    const checkGens = await getUserGenerations(userId);
+    if (checkGens <= 0) {
+        userPendingRequests.delete(userId);
+        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getAdKeyboard(userId) });
+        return;
+    }
     processRequest(msg.text, false);
   }
 });
 
-// Запуск сервера
+// --- API ДЛЯ ОТПРАВКИ ИЗОБРАЖЕНИЯ ---
+app.post('/api/send-image', async (req, res) => {
+    const { telegram_id, image_url } = req.body;
+
+    // Проверка входных данных
+    if (!telegram_id || !image_url) {
+        return res.status(400).json({ error: 'Missing telegram_id or image_url' });
+    }
+
+    try {
+        // Отправляем фото через бота
+        await bot.sendPhoto(telegram_id, image_url, {
+            caption: 'Сгенерированное изображение ✨'
+        });
+
+        return res.json({ success: true, message: 'Image sent to chat' });
+    } catch (error) {
+        console.error('Send image error:', error);
+        return res.status(500).json({ error: 'Failed to send image via Telegram Bot' });
+    }
+});
+
 app.listen(PORT, () => {
-  console.log(`Server and Bot running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
