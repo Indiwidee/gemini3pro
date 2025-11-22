@@ -12,6 +12,9 @@ const fsPromises = require('fs').promises;
 // --- КОНФИГУРАЦИЯ ---
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const groqApiKey = process.env.GROQ_API_KEY;
+// ВАЖНО: Вставь сюда ID блока из дашборда Adsgram (только цифры, без int-)
+const ADSGRAM_BLOCK_ID = process.env.ADSGRAM_BLOCK_ID || 'YOUR_BLOCK_ID_HERE'; 
+
 const PORT = process.env.PORT || 3000;
 const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:3000';
 
@@ -178,7 +181,64 @@ function getAnalyticsData() {
   });
 }
 
-// --- API ДЛЯ РЕКЛАМЫ ---
+// --- ФУНКЦИЯ ПОКАЗА РЕКЛАМЫ (ADSGRAM) ---
+async function showNativeAd(chatId, userId) {
+    try {
+        // Используем встроенный fetch (Node 18+)
+        const response = await fetch(`https://api.adsgram.ai/advbot?tgid=${userId}&blockid=${ADSGRAM_BLOCK_ID}`);
+        
+        if (!response.ok) {
+            throw new Error(`Adsgram API Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        // Если рекламы нет, API может вернуть пустой ответ или ошибку (зависит от API, но обработаем базово)
+        if (!data || !data.text_html) {
+            bot.sendMessage(chatId, '😔 На данный момент рекламных предложений нет. Попробуйте позже.');
+            return;
+        }
+
+        // Формируем клавиатуру из данных API
+        const inline_keyboard = [];
+        
+        // Кнопка перехода (click_url)
+        if (data.button_name && data.click_url) {
+            inline_keyboard.push([{ text: data.button_name, url: data.click_url }]);
+        }
+        
+        // Кнопка награды (reward_url)
+        if (data.button_reward_name && data.reward_url) {
+            inline_keyboard.push([{ text: data.button_reward_name, url: data.reward_url }]);
+        }
+
+        // Отправляем фото с текстом и кнопками
+        // protect_content: true - обязательно по докам
+        await bot.sendPhoto(chatId, data.image_url, {
+            caption: data.text_html,
+            parse_mode: 'HTML',
+            protect_content: true,
+            reply_markup: {
+                inline_keyboard: inline_keyboard
+            }
+        });
+        
+        // Опционально: можно автоматически начислять награду тут, 
+        // но правильнее, чтобы пользователь кликнул reward_url, и Adsgram засчитал конверсию.
+        // Для упрощения UX, если ты хочешь давать награду сразу за *показ* (хотя Adsgram платит за действия), 
+        // раскомментируй строки ниже. Но лучше доверять reward_url.
+        
+        // await addGenerations(userId, 2);
+        // bot.sendMessage(chatId, '💡 Нажми на кнопку выше, чтобы забрать награду!');
+
+    } catch (error) {
+        console.error('Error fetching ads:', error);
+        bot.sendMessage(chatId, '⚠️ Произошла ошибка при загрузке рекламы. Попробуйте позже.');
+    }
+}
+
+
+// --- API ДЛЯ РЕКЛАМЫ (Остается для обратной совместимости или вебхуков) ---
 app.post('/api/reward/:userId', async (req, res) => {
   const { userId } = req.params;
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
@@ -284,10 +344,10 @@ function getStartKeyboard(userId) {
 }
 
 function getProfileKeyboard(userId) {
-    const adLink = `${WEB_APP_URL}/advertisement.html?telegram_id=${userId}`;
+    // ИЗМЕНЕНИЕ: Теперь кнопка ведет не на сайт, а вызывает callback 'show_ad'
     return {
         inline_keyboard: [
-            [{ text: '📺 +2 Генерации (Реклама)', url: adLink }],
+            [{ text: '📺 +2 Генерации (Реклама)', callback_data: 'show_ad' }], 
             [{ text: '💰 Купить 100 ⚡', callback_data: 'buy_100' }, { text: '💰 Купить 500 ⚡', callback_data: 'buy_500' }],
             [{ text: '💰 Купить 1000 ⚡', callback_data: 'buy_1000' }],
             [{ text: '🔙 Назад', callback_data: 'close_settings' }]
@@ -371,7 +431,13 @@ bot.on('callback_query', async (query) => {
     const messageId = query.message.message_id;
     const data = query.data;
 
-    if (data === 'profile_main') {
+    // ИЗМЕНЕНИЕ: Обработка просмотра рекламы
+    if (data === 'show_ad') {
+        bot.sendMessage(chatId, '⏳ Загружаю рекламу...');
+        bot.answerCallbackQuery(query.id);
+        await showNativeAd(chatId, userId);
+    }
+    else if (data === 'profile_main') {
         const user = await getUserData(userId);
         const caption = `👤 *Ваш Профиль*
 
