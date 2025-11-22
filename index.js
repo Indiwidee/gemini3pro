@@ -276,7 +276,7 @@ async function generateAIResponse(userId, message, imageUrl = null) {
 function getStartKeyboard(userId) {
     return {
         inline_keyboard: [
-            [{ text: '🖼️ Генератор изображений', url: 'https://t.me/SwiftBrain_pro_bot/imagen' }],
+            [{ text: '🖼️ Генератор изображений', url: 'https://t.me/swiftbrainbot/imagen' }],
             [{ text: '⚙️ Настройка ИИ', callback_data: 'settings_main' }],
             [{ text: '👤 Профиль', callback_data: 'profile_main' }]
         ]
