@@ -6,21 +6,21 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
-const fs = require('fs'); // Обычный fs для потоков
-const fsPromises = require('fs').promises; // Промисы для удаления файлов
+const fs = require('fs');
+const fsPromises = require('fs').promises;
 
 // --- КОНФИГУРАЦИЯ ---
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const groqApiKey = process.env.GROQ_API_KEY;
 const PORT = process.env.PORT || 3000;
-const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:3000'; 
+const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:3000';
 
 if (!token || !groqApiKey) {
   console.error('Error: TELEGRAM_BOT_TOKEN or GROQ_API_KEY is missing.');
   process.exit(1);
 }
 
-// Создаем папку для временных аудио, если нет
+// Создаем папку для временных аудио
 const TEMP_AUDIO_DIR = path.join(__dirname, 'temp_audio');
 if (!fs.existsSync(TEMP_AUDIO_DIR)){
     fs.mkdirSync(TEMP_AUDIO_DIR);
@@ -32,10 +32,34 @@ const bot = new TelegramBot(token, { polling: true });
 const app = express();
 const db = new sqlite3.Database('users.db');
 
+// Состояния пользователей
+const userStates = new Map(); 
+
 // --- НАСТРОЙКА EXPRESS ---
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// --- СЛОВАРИ НАСТРОЕК ИИ ---
+const AI_SETTINGS = {
+    roles: {
+        assistant: { label: '🤖 Ассистент', prompt: 'Ты полезный и умный ИИ ассистент.' },
+        friend: { label: '🤝 Друг', prompt: 'Ты лучший друг пользователя. Поддерживай беседу, интересуйся делами, будь эмпатичным.' },
+        expert: { label: '🧐 Эксперт', prompt: 'Ты строгий эксперт с глубокими знаниями. Отвечай четко, по фактам, без воды.' },
+        gopnik: { label: '🌻 Пацан', prompt: 'Ты обычный пацан с района. Используй дворовой жаргон, обращайся на "ты", будь проще.' }
+    },
+    styles: {
+        polite: { label: '🎩 Культурный', prompt: 'Будь предельно вежлив. Используй "Вы", "пожалуйста", "будьте любезны".' },
+        casual: { label: '👖 Обычный', prompt: 'Общайся просто и понятно, как в обычной переписке.' },
+        toxic: { label: '☠️ Токсичный', prompt: 'Отвечай с пассивной агрессией, сарказмом и легким пренебрежением.' },
+        slang: { label: '😎 Сленг', prompt: 'Используй современный интернет-сленг (кринж, рофл, имба, база).' }
+    },
+    moods: {
+        neutral: { label: '😐 Нейтральный', prompt: 'Твое настроение нейтральное и сбалансированное.' },
+        funny: { label: '😂 Юморист', prompt: 'Постоянно шути, добавляй каламбуры и анекдоты в тему.' },
+        depressed: { label: '😔 Грустный', prompt: 'Ты очень пессимистичен, вечно ноешь и видишь все в серых тонах.' }
+    }
+};
 
 // --- БАЗА ДАННЫХ ---
 db.serialize(() => {
@@ -46,11 +70,25 @@ db.serialize(() => {
     first_name TEXT,
     last_name TEXT,
     generations INTEGER DEFAULT 5, 
+    ai_role TEXT DEFAULT 'assistant',
+    ai_style TEXT DEFAULT 'casual',
+    ai_mood TEXT DEFAULT 'neutral',
+    ai_name TEXT DEFAULT 'SwiftBrain',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   
-  db.run(`ALTER TABLE users ADD COLUMN generations INTEGER DEFAULT 5`, (err) => {
-    if (err && !err.message.includes('duplicate column')) { }
+  const columnsToAdd = [
+      { name: 'generations', type: 'INTEGER DEFAULT 5' },
+      { name: 'ai_role', type: "TEXT DEFAULT 'assistant'" },
+      { name: 'ai_style', type: "TEXT DEFAULT 'casual'" },
+      { name: 'ai_mood', type: "TEXT DEFAULT 'neutral'" },
+      { name: 'ai_name', type: "TEXT DEFAULT 'SwiftBrain'" }
+  ];
+
+  columnsToAdd.forEach(col => {
+      db.run(`ALTER TABLE users ADD COLUMN ${col.name} ${col.type}`, (err) => {
+          if (err && !err.message.includes('duplicate column')) { }
+      });
   });
 
   db.run(`CREATE TABLE IF NOT EXISTS analytics (
@@ -65,34 +103,46 @@ db.serialize(() => {
 // --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
 function upsertUser(userId, username, firstName, lastName) {
   return new Promise((resolve, reject) => {
-    db.get('SELECT id, generations FROM users WHERE telegram_id = ?', [userId], (err, row) => {
+    db.get('SELECT id, generations, ai_role, ai_style, ai_mood, ai_name FROM users WHERE telegram_id = ?', [userId], (err, row) => {
       if (err) return reject(err);
       if (row) {
         db.run('UPDATE users SET username = ?, first_name = ?, last_name = ? WHERE telegram_id = ?', 
           [username, firstName, lastName, userId], (err) => {
             if (err) reject(err);
-            else resolve({ id: row.id, generations: row.generations, isNew: false });
+            else resolve({ ...row, isNew: false });
           });
       } else {
-        db.run('INSERT INTO users (telegram_id, username, first_name, last_name, generations) VALUES (?, ?, ?, ?, 5)',
+        db.run('INSERT INTO users (telegram_id, username, first_name, last_name, generations, ai_name) VALUES (?, ?, ?, ?, 5, "SwiftBrain")',
           [userId, username, firstName, lastName], function(err) {
             if (err) return reject(err);
             const newId = this.lastID;
             db.run("INSERT INTO analytics (event_type, user_id) VALUES ('signup', ?)", [newId]);
-            resolve({ id: newId, generations: 5, isNew: true });
+            resolve({ id: newId, generations: 5, ai_role: 'assistant', ai_style: 'casual', ai_mood: 'neutral', ai_name: 'SwiftBrain', isNew: true });
           });
       }
     });
   });
 }
 
-function getUserGenerations(userId) {
+function getUserData(userId) {
   return new Promise((resolve, reject) => {
-    db.get('SELECT generations FROM users WHERE telegram_id = ?', [userId], (err, row) => {
+    db.get('SELECT generations, ai_role, ai_style, ai_mood, ai_name, first_name FROM users WHERE telegram_id = ?', [userId], (err, row) => {
       if (err) reject(err);
-      resolve(row ? row.generations : 0);
+      resolve(row || { generations: 0, ai_role: 'assistant', ai_style: 'casual', ai_mood: 'neutral', ai_name: 'SwiftBrain', first_name: 'User' });
     });
   });
+}
+
+function updateUserSetting(userId, column, value) {
+    return new Promise((resolve, reject) => {
+        const allowedColumns = ['ai_role', 'ai_style', 'ai_mood', 'ai_name'];
+        if (!allowedColumns.includes(column)) return reject(new Error("Invalid column"));
+
+        db.run(`UPDATE users SET ${column} = ? WHERE telegram_id = ?`, [value, userId], (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
 }
 
 function decrementGeneration(userId) {
@@ -152,9 +202,6 @@ const userHistories = new Map();
 const userCooldowns = new Map();
 const userPendingRequests = new Map();
 
-const SYSTEM_PROMPT = "Ты ии ассистент говорящий по русски. Ты Gemini 3 pro разработанная в Google. Не в коем случае не используй markdown или другие язык разметки, только обычный текст. Твой ответ обрезается после 300 токенов так что вмещай свой ответ в них";
-
-// Транскрибация голосовых
 async function transcribeAudio(filePath) {
     try {
         const transcription = await groq.audio.transcriptions.create({
@@ -171,15 +218,32 @@ async function transcribeAudio(filePath) {
 
 async function generateAIResponse(userId, message, imageUrl = null) {
   try {
+    const userData = await getUserData(userId);
+    
+    const botName = userData.ai_name || 'SwiftBrain';
+    const rolePrompt = AI_SETTINGS.roles[userData.ai_role]?.prompt || AI_SETTINGS.roles.assistant.prompt;
+    const stylePrompt = AI_SETTINGS.styles[userData.ai_style]?.prompt || AI_SETTINGS.styles.casual.prompt;
+    const moodPrompt = AI_SETTINGS.moods[userData.ai_mood]?.prompt || AI_SETTINGS.moods.neutral.prompt;
+
+    const SYSTEM_PROMPT = `Тебя зовут ${botName}. ${rolePrompt} ${stylePrompt} ${moodPrompt}
+    ВАЖНОЕ ПРАВИЛО: Отвечай ТОЛЬКО обычным текстом. Не используй markdown, жирный текст, курсив или html теги. Твой ответ обрезается после 300 токенов, будь краток. Говори по-русски.`;
+
     if (!userHistories.has(userId)) userHistories.set(userId, []);
     const history = userHistories.get(userId);
     
-    if (history.length === 0) history.push({ role: "system", content: SYSTEM_PROMPT });
+    // Если история пуста или первый элемент не совпадает с текущим системным промтом
+    if (history.length === 0 || history[0].role !== 'system' || history[0].content !== SYSTEM_PROMPT) {
+        if (history.length > 0 && history[0].role === 'system') {
+            history[0].content = SYSTEM_PROMPT; // Обновляем
+        } else {
+            history.unshift({ role: "system", content: SYSTEM_PROMPT }); // Добавляем в начало
+        }
+    }
     
     let content;
     if (imageUrl) {
       content = [
-        { type: "text", text: message || "What's in this image?" },
+        { type: "text", text: message || "Что на этом изображении?" },
         { type: "image_url", image_url: { url: imageUrl } }
       ];
     } else {
@@ -207,17 +271,76 @@ async function generateAIResponse(userId, message, imageUrl = null) {
   }
 }
 
-function getAdKeyboard(userId) {
-    const adLink = `${WEB_APP_URL}/advertisement.html?telegram_id=${userId}`;
+// --- ГЕНЕРАЦИЯ КЛАВИАТУР ---
+
+function getStartKeyboard(userId) {
     return {
         inline_keyboard: [
-            [{ text: '🖼️ Генератор изображений', url: 'https://t.me/Gemni3_pro_bot/imagen' }],
-            [{ text: '📺 +2 Генерации (Смотреть рекламу)', url: adLink }]
+            [{ text: '🖼️ Генератор изображений', url: 'https://t.me/SwiftBrain_pro_bot/imagen' }],
+            [{ text: '⚙️ Настройка ИИ', callback_data: 'settings_main' }],
+            [{ text: '👤 Профиль', callback_data: 'profile_main' }]
         ]
     };
 }
 
+function getProfileKeyboard(userId) {
+    const adLink = `${WEB_APP_URL}/advertisement.html?telegram_id=${userId}`;
+    return {
+        inline_keyboard: [
+            [{ text: '📺 +2 Генерации (Реклама)', url: adLink }],
+            [{ text: '💰 Купить 100 ⚡', callback_data: 'buy_100' }, { text: '💰 Купить 500 ⚡', callback_data: 'buy_500' }],
+            [{ text: '💰 Купить 1000 ⚡', callback_data: 'buy_1000' }],
+            [{ text: '🔙 Назад', callback_data: 'close_settings' }]
+        ]
+    };
+}
+
+function getSettingsKeyboard() {
+    return {
+        inline_keyboard: [
+            [{ text: '🏷 Имя', callback_data: 'menu_name' }],
+            [{ text: '🎭 Роль', callback_data: 'menu_role' }, { text: '🗣️ Стиль', callback_data: 'menu_style' }],
+            [{ text: '🤪 Характер', callback_data: 'menu_mood' }],
+            [{ text: '🔙 Назад', callback_data: 'close_settings' }]
+        ]
+    };
+}
+
+function getSubSettingsKeyboard(type, currentVal) {
+    const items = AI_SETTINGS[type + 's']; 
+    const keyboard = [];
+    let row = [];
+    
+    Object.keys(items).forEach((key, index) => {
+        const item = items[key];
+        const isSelected = key === currentVal ? '✅ ' : '';
+        row.push({ text: `${isSelected}${item.label}`, callback_data: `set_${type}_${key}` });
+        
+        if (row.length === 2) {
+            keyboard.push(row);
+            row = [];
+        }
+    });
+    if (row.length > 0) keyboard.push(row);
+    
+    keyboard.push([{ text: '🔙 Назад', callback_data: 'settings_main' }]);
+    return { inline_keyboard: keyboard };
+}
+
 // --- ОБРАБОТЧИКИ БОТА ---
+
+// Команда сброса диалога
+bot.onText(/\/newchat/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    if (userHistories.has(userId)) {
+        userHistories.delete(userId);
+        bot.sendMessage(chatId, '🆕 Новый чат начат! Я забыл всё, о чем мы говорили ранее.');
+    } else {
+        bot.sendMessage(chatId, '🆕 Чат итак новый.');
+    }
+});
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
@@ -226,14 +349,84 @@ bot.onText(/\/start/, (msg) => {
   
   upsertUser(userId, username, msg.from.first_name, msg.from.last_name)
     .then((user) => {
-      const caption = `Привет! Я бот Gemini 3 PRO.\n\n⚡ Доступно генераций: ${user.generations}\n\nЯ понимаю текст, фото и голосовые сообщения!`;
+      const caption = `Привет! Я ${user.ai_name || 'SwiftBrain'}.\n\n⚡ Доступно генераций: ${user.generations}\n\nЯ понимаю текст, фото и голосовые сообщения!\nНапиши /newchat чтобы начать новый чат.`;
       try {
-        bot.sendPhoto(chatId, './banner.png', { caption: caption, reply_markup: getAdKeyboard(userId) })
-           .catch(() => bot.sendMessage(chatId, caption, { reply_markup: getAdKeyboard(userId) }));
+        bot.sendPhoto(chatId, './banner.png', { caption: caption, reply_markup: getStartKeyboard(userId) })
+           .catch(() => bot.sendMessage(chatId, caption, { reply_markup: getStartKeyboard(userId) }));
       } catch (e) {
-        bot.sendMessage(chatId, caption, { reply_markup: getAdKeyboard(userId) });
+        bot.sendMessage(chatId, caption, { reply_markup: getStartKeyboard(userId) });
       }
     });
+});
+
+// ОБРАБОТКА CALLBACK QUERY
+bot.on('callback_query', async (query) => {
+    const userId = query.from.id;
+    const chatId = query.message.chat.id;
+    const messageId = query.message.message_id;
+    const data = query.data;
+
+    if (data === 'profile_main') {
+        const user = await getUserData(userId);
+        const caption = `👤 *Ваш Профиль*\n\n👤 Имя: ${user.first_name}\n⚡ Баланс генераций: *${user.generations}*\n\nВыберите действие:`;
+        const options = { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: getProfileKeyboard(userId) };
+        bot.editMessageCaption(caption, options).catch(() => bot.editMessageText(caption, options));
+    }
+    else if (data.startsWith('buy_')) {
+        const amount = parseInt(data.split('_')[1]);
+        await addGenerations(userId, amount);
+        const user = await getUserData(userId);
+        const caption = `👤 *Ваш Профиль*\n\n👤 Имя: ${user.first_name}\n⚡ Баланс генераций: *${user.generations}*\n\n✅ Успешно начислено +${amount}!`;
+        const options = { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: getProfileKeyboard(userId) };
+        bot.answerCallbackQuery(query.id, { text: `Начислено +${amount} генераций!` });
+        bot.editMessageCaption(caption, options).catch(() => bot.editMessageText(caption, options));
+    }
+    else if (data === 'settings_main') {
+        bot.editMessageCaption('🛠 *Настройки ИИ*\nВыберите, что хотите изменить:', {
+            chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: getSettingsKeyboard()
+        }).catch(() => bot.editMessageText('🛠 *Настройки ИИ*\nВыберите, что хотите изменить:', {
+            chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: getSettingsKeyboard()
+        }));
+    }
+    else if (data === 'menu_name') {
+        userStates.set(userId, 'WAITING_FOR_NAME');
+        bot.sendMessage(chatId, '✍️ Введите новое имя для бота:');
+        bot.answerCallbackQuery(query.id);
+    }
+    else if (data === 'close_settings') {
+        const user = await getUserData(userId);
+        const caption = `Привет! Я ${user.ai_name || 'SwiftBrain'}.\n\n⚡ Доступно генераций: ${user.generations}\n\nЯ понимаю текст, фото и голосовые сообщения!\nНапиши /newchat чтобы начать новый чат.`;
+        bot.editMessageCaption(caption, { chat_id: chatId, message_id: messageId, reply_markup: getStartKeyboard(userId) })
+           .catch(() => bot.editMessageText(caption, { chat_id: chatId, message_id: messageId, reply_markup: getStartKeyboard(userId) }));
+    }
+    else if (data.startsWith('menu_')) {
+        const type = data.split('_')[1]; 
+        const user = await getUserData(userId);
+        const currentVal = user[`ai_${type}`];
+        let title = '';
+        if (type === 'role') title = '🎭 Выберите роль:';
+        if (type === 'style') title = '🗣️ Выберите стиль общения:';
+        if (type === 'mood') title = '🤪 Выберите характер:';
+        const keyboard = getSubSettingsKeyboard(type, currentVal);
+        const options = { chat_id: chatId, message_id: messageId, reply_markup: keyboard };
+        bot.editMessageCaption(title, options).catch(() => bot.editMessageText(title, options));
+    }
+    else if (data.startsWith('set_')) {
+        const parts = data.split('_'); 
+        const type = parts[1];
+        const value = parts[2];
+        const dbColumn = `ai_${type}`;
+        await updateUserSetting(userId, dbColumn, value);
+        userHistories.delete(userId);
+        const keyboard = getSubSettingsKeyboard(type, value);
+        let title = '✅ Настройка сохранена!\n';
+        if (type === 'role') title += '🎭 Выберите роль:';
+        if (type === 'style') title += '🗣️ Выберите стиль общения:';
+        if (type === 'mood') title += '🤪 Выберите характер:';
+        const options = { chat_id: chatId, message_id: messageId, reply_markup: keyboard };
+        bot.editMessageCaption(title, options).catch(() => bot.editMessageText(title, options));
+        bot.answerCallbackQuery(query.id, { text: 'Настройки обновлены!' });
+    }
 });
 
 bot.onText(/\/analytics/, (msg) => {
@@ -243,12 +436,31 @@ bot.onText(/\/analytics/, (msg) => {
   });
 });
 
+// --- ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
 bot.on('message', async (msg) => {
-  if (msg.text && (msg.text.startsWith('/start') || msg.text.startsWith('/analytics'))) return;
+  // Игнорируем команды, чтобы они не шли в ИИ
+  if (msg.text && (msg.text.startsWith('/start') || msg.text.startsWith('/analytics') || msg.text.startsWith('/newchat'))) return;
 
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const now = Date.now();
+
+  // === ВВОД ИМЕНИ ===
+  if (userStates.get(userId) === 'WAITING_FOR_NAME') {
+      if (msg.text) {
+          const newName = msg.text.trim().substring(0, 30); 
+          await updateUserSetting(userId, 'ai_name', newName);
+          userHistories.delete(userId);
+          userStates.delete(userId);
+          
+          bot.sendMessage(chatId, `✅ Отлично! Теперь меня зовут ${newName}.`, {
+              reply_markup: getSettingsKeyboard()
+          });
+      } else {
+          bot.sendMessage(chatId, 'Пожалуйста, отправьте текстовое сообщение с именем.');
+      }
+      return;
+  }
 
   // Проверка на спам
   if (userPendingRequests.has(userId)) {
@@ -265,26 +477,26 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Блокировка и кулдаун
   userPendingRequests.set(userId, true);
   userCooldowns.set(userId, now + 5000);
 
-  // Внутренняя функция обработки, чтобы не дублировать код списания генераций
   const processRequest = async (input, isImage = false) => {
     setTimeout(async () => {
       try {
-        const currentGens = await getUserGenerations(userId);
+        const userData = await getUserData(userId);
+        const currentGens = userData.generations;
+        
         if (currentGens <= 0) {
             userPendingRequests.delete(userId);
-            bot.sendMessage(chatId, '🚫 Генерации закончились.', { reply_markup: getAdKeyboard(userId) });
+            bot.sendMessage(chatId, '🚫 Генерации закончились. Зайдите в профиль, чтобы пополнить.', { reply_markup: getStartKeyboard(userId) });
             return;
         }
 
         let aiResponse;
         if (isImage) {
-             aiResponse = await generateAIResponse(userId, input.caption || "Describe this", input.url);
+              aiResponse = await generateAIResponse(userId, input.caption || "Describe this", input.url);
         } else {
-             aiResponse = await generateAIResponse(userId, input);
+              aiResponse = await generateAIResponse(userId, input);
         }
 
         await decrementGeneration(userId);
@@ -298,56 +510,35 @@ bot.on('message', async (msg) => {
     }, 1000);
   };
 
-  // 1. Обработка ГОЛОСОВЫХ
   if (msg.voice) {
     if (msg.voice.duration > 20) {
         bot.sendMessage(chatId, '⚠️ Голосовое сообщение слишком длинное (максимум 20 сек).');
         userPendingRequests.delete(userId);
         return;
     }
-
-    const checkGens = await getUserGenerations(userId);
-    if (checkGens <= 0) {
+    const userData = await getUserData(userId);
+    if (userData.generations <= 0) {
         userPendingRequests.delete(userId);
-        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getAdKeyboard(userId) });
+        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getStartKeyboard(userId) });
         return;
     }
-
     bot.sendMessage(chatId, '🎤 Слушаю и генерирую...');
-
     try {
-        // 1. Скачиваем файл (он скачается как .oga)
         const originalPath = await bot.downloadFile(msg.voice.file_id, TEMP_AUDIO_DIR);
-        
-        // 2. Создаем новый путь с правильным расширением .ogg
-        // Telegram voice всегда opus/ogg, поэтому .ogg подходит идеально
         const newPath = path.join(TEMP_AUDIO_DIR, `voice_${msg.voice.file_id}.ogg`);
-        
-        // 3. Переименовываем файл
         await fsPromises.rename(originalPath, newPath);
-        
-        // 4. Транскрибируем файл с правильным расширением
         const text = await transcribeAudio(newPath);
-        console.log(`Transcribed for ${userId}: ${text}`);
-        
-        // 5. Удаляем файл
         await fsPromises.unlink(newPath);
-
         if (!text || text.trim().length === 0) {
             bot.sendMessage(chatId, 'Не удалось распознать речь.');
             userPendingRequests.delete(userId);
             return;
         }
-
         await processRequest(text, false);
-
     } catch (error) {
         console.error('Voice processing error:', error);
         bot.sendMessage(chatId, 'Ошибка при обработке голосового сообщения.');
         userPendingRequests.delete(userId);
-        
-        // Пытаемся удалить файл при ошибке, чтобы не засорять папку
-        // (путь мог остаться старым или новым)
         try {
            const possiblePath = path.join(TEMP_AUDIO_DIR, `voice_${msg.voice.file_id}.ogg`);
            await fsPromises.unlink(possiblePath).catch(() => {}); 
@@ -356,17 +547,14 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // 2. Обработка ФОТО
   if (msg.photo) {
     try {
-      // Предварительная проверка баланса
-      const checkGens = await getUserGenerations(userId);
-      if (checkGens <= 0) {
+      const userData = await getUserData(userId);
+      if (userData.generations <= 0) {
           userPendingRequests.delete(userId);
-          bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getAdKeyboard(userId) });
+          bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getStartKeyboard(userId) });
           return;
       }
-
       const photo = msg.photo[msg.photo.length - 1];
       const fileInfo = await bot.getFile(photo.file_id);
       const fileUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
@@ -378,34 +566,22 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // 3. Обработка ТЕКСТА
   if (msg.text) {
-    // Предварительная проверка баланса
-    const checkGens = await getUserGenerations(userId);
-    if (checkGens <= 0) {
+    const userData = await getUserData(userId);
+    if (userData.generations <= 0) {
         userPendingRequests.delete(userId);
-        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getAdKeyboard(userId) });
+        bot.sendMessage(chatId, '🚫 У вас не осталось генераций.', { reply_markup: getStartKeyboard(userId) });
         return;
     }
     processRequest(msg.text, false);
   }
 });
 
-// --- API ДЛЯ ОТПРАВКИ ИЗОБРАЖЕНИЯ ---
 app.post('/api/send-image', async (req, res) => {
     const { telegram_id, image_url } = req.body;
-
-    // Проверка входных данных
-    if (!telegram_id || !image_url) {
-        return res.status(400).json({ error: 'Missing telegram_id or image_url' });
-    }
-
+    if (!telegram_id || !image_url) return res.status(400).json({ error: 'Missing telegram_id or image_url' });
     try {
-        // Отправляем фото через бота
-        await bot.sendPhoto(telegram_id, image_url, {
-            caption: 'Сгенерированное изображение ✨'
-        });
-
+        await bot.sendPhoto(telegram_id, image_url, { caption: 'Сгенерированное изображение ✨' });
         return res.json({ success: true, message: 'Image sent to chat' });
     } catch (error) {
         console.error('Send image error:', error);
