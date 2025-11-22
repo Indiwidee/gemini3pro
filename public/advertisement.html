@@ -79,12 +79,11 @@
             btn.innerText = "Получение награды...";
             
             // Отправляем запрос на наш сервер
-            fetch('/api/reward', {
+            fetch(`/api/reward/${telegramId}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ telegram_id: telegramId })
+                }
             })
             .then(response => response.json())
             .then(data => {

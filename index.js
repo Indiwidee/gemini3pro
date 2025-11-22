@@ -179,14 +179,14 @@ function getAnalyticsData() {
 }
 
 // --- API ДЛЯ РЕКЛАМЫ ---
-app.post('/api/reward', async (req, res) => {
-  const { telegram_id } = req.body;
-  if (!telegram_id) return res.status(400).json({ error: 'Missing telegram_id' });
+app.post('/api/reward/:userId', async (req, res) => {
+  const { userId } = req.params;
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
   try {
-    const success = await addGenerations(telegram_id, 2);
+    const success = await addGenerations(userId, 2);
     if (success) {
-      bot.sendMessage(telegram_id, '🎉 Спасибо за просмотр рекламы! Вам начислено +2 генерации.');
+      bot.sendMessage(userId, '🎉 Спасибо за просмотр рекламы! Вам начислено +2 генерации.');
       return res.json({ success: true, message: 'Generations added' });
     } else {
       return res.status(404).json({ error: 'User not found' });
@@ -349,7 +349,12 @@ bot.onText(/\/start/, (msg) => {
   
   upsertUser(userId, username, msg.from.first_name, msg.from.last_name)
     .then((user) => {
-      const caption = `Привет! Я ${user.ai_name || 'SwiftBrain'}.\n\n⚡ Доступно генераций: ${user.generations}\n\nЯ понимаю текст, фото и голосовые сообщения!\nНапиши /newchat чтобы начать новый чат.`;
+      const caption = `Привет! Я ${user.ai_name || 'SwiftBrain'}.
+
+⚡ Доступно генераций: ${user.generations}
+
+Я понимаю текст, фото и голосовые сообщения!
+Напиши /newchat чтобы начать новый чат.`;
       try {
         bot.sendPhoto(chatId, './banner.png', { caption: caption, reply_markup: getStartKeyboard(userId) })
            .catch(() => bot.sendMessage(chatId, caption, { reply_markup: getStartKeyboard(userId) }));
@@ -368,7 +373,12 @@ bot.on('callback_query', async (query) => {
 
     if (data === 'profile_main') {
         const user = await getUserData(userId);
-        const caption = `👤 *Ваш Профиль*\n\n👤 Имя: ${user.first_name}\n⚡ Баланс генераций: *${user.generations}*\n\nВыберите действие:`;
+        const caption = `👤 *Ваш Профиль*
+
+👤 Имя: ${user.first_name}
+⚡ Баланс генераций: *${user.generations}*
+
+Выберите действие:`;
         const options = { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: getProfileKeyboard(userId) };
         bot.editMessageCaption(caption, options).catch(() => bot.editMessageText(caption, options));
     }
@@ -376,7 +386,12 @@ bot.on('callback_query', async (query) => {
         const amount = parseInt(data.split('_')[1]);
         await addGenerations(userId, amount);
         const user = await getUserData(userId);
-        const caption = `👤 *Ваш Профиль*\n\n👤 Имя: ${user.first_name}\n⚡ Баланс генераций: *${user.generations}*\n\n✅ Успешно начислено +${amount}!`;
+        const caption = `👤 *Ваш Профиль*
+
+👤 Имя: ${user.first_name}
+⚡ Баланс генераций: *${user.generations}*
+
+✅ Успешно начислено +${amount}!`;
         const options = { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: getProfileKeyboard(userId) };
         bot.answerCallbackQuery(query.id, { text: `Начислено +${amount} генераций!` });
         bot.editMessageCaption(caption, options).catch(() => bot.editMessageText(caption, options));
@@ -395,7 +410,12 @@ bot.on('callback_query', async (query) => {
     }
     else if (data === 'close_settings') {
         const user = await getUserData(userId);
-        const caption = `Привет! Я ${user.ai_name || 'SwiftBrain'}.\n\n⚡ Доступно генераций: ${user.generations}\n\nЯ понимаю текст, фото и голосовые сообщения!\nНапиши /newchat чтобы начать новый чат.`;
+        const caption = `Привет! Я ${user.ai_name || 'SwiftBrain'}.
+
+⚡ Доступно генераций: ${user.generations}
+
+Я понимаю текст, фото и голосовые сообщения!
+Напиши /newchat чтобы начать новый чат.`;
         bot.editMessageCaption(caption, { chat_id: chatId, message_id: messageId, reply_markup: getStartKeyboard(userId) })
            .catch(() => bot.editMessageText(caption, { chat_id: chatId, message_id: messageId, reply_markup: getStartKeyboard(userId) }));
     }
