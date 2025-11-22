@@ -192,6 +192,7 @@ async function showNativeAd(chatId, userId) {
         }
 
         const data = await response.json();
+        console.log('Adsgram Response:', data);
 
         // Если рекламы нет, API может вернуть пустой ответ или ошибку (зависит от API, но обработаем базово)
         if (!data || !data.text_html) {
@@ -212,8 +213,6 @@ async function showNativeAd(chatId, userId) {
             inline_keyboard.push([{ text: data.button_reward_name, url: data.reward_url }]);
         }
 
-        // Отправляем фото с текстом и кнопками
-        // protect_content: true - обязательно по докам
         await bot.sendPhoto(chatId, data.image_url, {
             caption: data.text_html,
             parse_mode: 'HTML',
@@ -222,14 +221,6 @@ async function showNativeAd(chatId, userId) {
                 inline_keyboard: inline_keyboard
             }
         });
-        
-        // Опционально: можно автоматически начислять награду тут, 
-        // но правильнее, чтобы пользователь кликнул reward_url, и Adsgram засчитал конверсию.
-        // Для упрощения UX, если ты хочешь давать награду сразу за *показ* (хотя Adsgram платит за действия), 
-        // раскомментируй строки ниже. Но лучше доверять reward_url.
-        
-        // await addGenerations(userId, 2);
-        // bot.sendMessage(chatId, '💡 Нажми на кнопку выше, чтобы забрать награду!');
 
     } catch (error) {
         console.error('Error fetching ads:', error);
